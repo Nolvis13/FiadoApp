@@ -281,7 +281,14 @@ async function imprimirMov(ctx, c, m) {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <SQLiteProvider databaseName={DB_NOMBRE} onInit={iniciarDB}>
+      <SQLiteProvider
+        databaseName={DB_NOMBRE}
+        onInit={iniciarDB}
+        onError={(error) => {
+          console.error('SQLiteProvider error:', error);
+        }}
+        options={{ useNewConnection: false }}
+      >
         <Principal />
       </SQLiteProvider>
     </SafeAreaProvider>
