@@ -1,0 +1,34 @@
+{
+  "expo": {
+    "name": "FiadoApp",
+    "slug": "FiadoApp",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/Ícono FiadoApp_ Tu Libreta Digital.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "icon": "./assets/Ícono FiadoApp_ Tu Libreta Digital.png",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/Ícono FiadoApp_ Tu Libreta Digital.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "package": "com.nolvis.FiadoApp"
+    },
+    "web": {
+      "favicon": "./assets/Ícono FiadoApp_ Tu Libreta Digital.png"
+    },
+    "plugins": [
+      "expo-sqlite"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "994a1875-9bee-4aff-8dd1-cb8768a85a1b"
+      }
+    }
+  }
+}
