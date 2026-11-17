@@ -1,9 +1,17 @@
 import { Platform } from 'react-native';
 import * as Print from 'expo-print';
+import RNBluetoothClassic from 'react-native-bluetooth-classic';
 import { RD, fmtFechaHora, fmtYMD } from './utils';
 
 const esc = (t) =>
   String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const quitarTildes = (text) => String(text ?? '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[«»“”]/g, '"')
+  .replace(/ñ/g, 'n')
+  .replace(/Ñ/g, 'N');
 
 // Balance del cliente antes y después de un movimiento
 export function balancesDe(movsCliente, mov) {
@@ -78,4 +86,81 @@ export async function imprimir(html, cfg) {
   // 58 mm ≈ 164 puntos, 80 mm ≈ 227 puntos
   const ancho = cfg.comprobante_ancho === '80' ? 227 : 164;
   await Print.printAsync({ html, width: ancho });
+}
+
+export async function listarImpresorasBluetooth() {
+  if (Platform.OS !== 'android') {
+    throw new Error('La impresión Bluetooth directa está disponible en Android.');
+  }
+  const habilitado = await RNBluetoothClassic.isBluetoothEnabled();
+  if (!habilitado) {
+    await RNBluetoothClassic.requestBluetoothEnabled();
+  }
+  return RNBluetoothClassic.getBondedDevices();
+}
+
+export async function imprimirPorBluetooth(cfg, texto) {
+  if (Platform.OS !== 'android') {
+    throw new Error('La impresión Bluetooth directa está disponible en Android.');
+  }
+
+  const direccion = cfg?.impresora_bluetooth_direccion;
+  if (!direccion) {
+    throw new Error('Primero selecciona una impresora Bluetooth en Ajustes.');
+  }
+
+  const dispositivos = await RNBluetoothClassic.getBondedDevices();
+  let dispositivo = dispositivos.find((item) => item.address === direccion);
+  if (!dispositivo) {
+    throw new Error('La impresora seleccionada ya no está emparejada.');
+  }
+
+  if (await dispositivo.isConnected()) {
+    await dispositivo.disconnect();
+  }
+
+  dispositivo = await dispositivo.connect();
+  const ancho = cfg.comprobante_ancho === '80' ? 48 : 32;
+  const limpio = quitarTildes(texto)
+    .split('\n')
+    .map((linea) => linea.length <= ancho ? linea : linea.match(new RegExp(`.{1,${ancho}}`, 'g'))?.join('\n') || '')
+    .join('\n');
+
+  const escPos = '\x1B@\x1B!' + '\x00' + limpio + '\n\n\n\x1D\x56\x00';
+  await dispositivo.write(escPos);
+  await dispositivo.disconnect();
+}
+
+export function construirTextoComprobante({ cfg, cliente, mov, balanceAntes, balanceDespues }) {
+  const esFiado = mov.tipo === 'fiao';
+  const num = String(mov.id).padStart(6, '0');
+  const lineas = [
+    cfg.negocio_nombre || '',
+    cfg.negocio_telefono ? `Tel: ${cfg.negocio_telefono}` : '',
+    cfg.negocio_direccion || '',
+    '--------------------------------',
+    `COMPROBANTE DE ${esFiado ? 'FIADO' : 'ABONO'}`,
+    `No. ${num}`,
+    '--------------------------------',
+    `Fecha: ${fmtFechaHora(mov.fecha)}`,
+    `Cliente: ${cliente.nombre || ''}`,
+  ];
+
+  if (mov.nota) lineas.push(`Detalle: ${mov.nota}`);
+  if (esFiado && mov.fecha_limite) lineas.push(`Vence: ${fmtYMD(mov.fecha_limite)}`);
+  if (!esFiado && mov.metodo) lineas.push(`Pago: ${mov.metodo}`);
+
+  lineas.push(
+    '--------------------------------',
+    `Balance anterior: ${RD(balanceAntes)}`,
+    `${esFiado ? 'FIADO' : 'ABONO'}: ${RD(mov.monto)}`,
+    `BALANCE: ${RD(balanceDespues)}`,
+    '--------------------------------',
+  );
+
+  if (mov.creado_por) lineas.push(`Atendido por: ${mov.creado_por}`);
+  if (mov.anulado) lineas.push('*** ANULADO ***');
+  if (cfg.comprobante_pie) lineas.push(cfg.comprobante_pie);
+
+  return quitarTildes(lineas.filter(Boolean).join('\n'));
 }

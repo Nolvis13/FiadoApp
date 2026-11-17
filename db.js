@@ -1,8 +1,13 @@
+import { Platform } from 'react-native';
 import { hoyYMD, CONFIG_DEFECTO } from './utils';
 
 // ---------- Base de datos (con migraciones) ----------
 export async function iniciarDB(db) {
-  await db.execAsync('PRAGMA journal_mode = WAL;');
+  if (Platform.OS === 'web') {
+    await db.execAsync('PRAGMA journal_mode = DELETE;');
+  } else {
+    await db.execAsync('PRAGMA journal_mode = WAL;');
+  }
   const fila = await db.getFirstAsync('PRAGMA user_version');
   const version = fila ? fila.user_version : 0;
 

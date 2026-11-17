@@ -81,6 +81,8 @@ export const CONFIG_DEFECTO = {
   comprobante_pie: '¡Gracias por su preferencia!',
   comprobante_ancho: '58',
   comprobante_logo: '1',
+  impresora_bluetooth_nombre: '',
+  impresora_bluetooth_direccion: '',
 };
 
 export function parseBoolean(value, fallback = false) {

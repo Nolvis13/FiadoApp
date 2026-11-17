@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, ScrollView, Image,
-  StyleSheet, Platform, Linking,
+  StyleSheet, Platform, Linking, PermissionsAndroid,
 } from 'react-native';
 import { SQLiteProvider, useSQLiteContext } from 'expo-sqlite';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -19,8 +19,14 @@ import {
   ADMIN_PASS, generarCodigoActivacion, validarCodigoActivacion,
 } from './utils';
 import { iniciarDB, leerConfig, guardarConfig, auditar, calcularCliente } from './db';
-import { construirComprobante, imprimir, balancesDe } from './comprobante';
-import * as Notifications from 'expo-notifications';
+import {
+  construirComprobante,
+  construirTextoComprobante,
+  imprimir,
+  imprimirPorBluetooth,
+  listarImpresorasBluetooth,
+  balancesDe,
+} from './comprobante';
 
 const DIAS_DE_PRUEBA = 30;
 
@@ -270,7 +276,20 @@ async function imprimirMov(ctx, c, m) {
     const html = construirComprobante({
       cfg: ctx.cfg, cliente: c, mov: m, balanceAntes: antes, balanceDespues: despues,
     });
-    await imprimir(html, ctx.cfg);
+
+    if (Platform.OS === 'android' && ctx.cfg?.impresora_bluetooth_direccion) {
+      const texto = construirTextoComprobante({
+        cfg: ctx.cfg,
+        cliente: c,
+        mov: m,
+        balanceAntes: antes,
+        balanceDespues: despues,
+      });
+      await imprimirPorBluetooth(ctx.cfg, texto);
+    } else {
+      await imprimir(html, ctx.cfg);
+    }
+
     await ctx.audit('movimiento', m.id, 'imprimir', 'Comprobante impreso');
   } catch (e) {
     avisar('No se pudo imprimir', String(e.message || e));
@@ -1207,6 +1226,8 @@ function Ajustes({ ctx, abrirAuditoria }) {
   const { db, cfg } = ctx;
   const [f, setF] = useState({ ...cfg });
   const [adminSession, setAdminSession] = useState(Boolean(cfg?.admin_session));
+  const [impresoras, setImpresoras] = useState([]);
+  const [buscandoImpresoras, setBuscandoImpresoras] = useState(false);
 
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
 
@@ -1223,9 +1244,7 @@ function Ajustes({ ctx, abrirAuditoria }) {
       licencia_activa: true,
       bloqueo_automatico: false,
     };
-
     await guardarConfig(db, limpio);
-    // Dejamos la clave solo en memoria del formulario para poder generar códigos
     setF({ ...limpio, admin_key: clave });
     setAdminSession(true);
     await ctx.recargar();
@@ -1233,10 +1252,7 @@ function Ajustes({ ctx, abrirAuditoria }) {
   }
 
   async function cerrarSesionAdmin() {
-    const limpio = {
-      ...sinSecretos(f),
-      admin_session: false,
-    };
+    const limpio = { ...sinSecretos(f), admin_session: false };
     await guardarConfig(db, limpio);
     setF(limpio);
     setAdminSession(false);
@@ -1244,21 +1260,65 @@ function Ajustes({ ctx, abrirAuditoria }) {
   }
 
   async function elegirLogo() {
-    const r = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsEditing: false,
-      quality: 0.5,
-      base64: true,
-    });
-    if (r.canceled) return;
-    const a = r.assets[0];
-    const uri =
-      a.uri && a.uri.startsWith('data:')
-        ? a.uri
-        : a.base64
-        ? `data:${a.mimeType || 'image/jpeg'};base64,${a.base64}`
-        : a.uri;
-    set('negocio_logo', uri);
+    try {
+      const resultado = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: false,
+        quality: 0.5,
+        base64: true,
+      });
+      if (resultado.canceled || !resultado.assets?.[0]) return;
+
+      const imagen = resultado.assets[0];
+      const uri = imagen.uri?.startsWith('data:')
+        ? imagen.uri
+        : imagen.base64
+          ? `data:${imagen.mimeType || 'image/jpeg'};base64,${imagen.base64}`
+          : imagen.uri;
+      if (uri) set('negocio_logo', uri);
+    } catch (error) {
+      avisar('No se pudo elegir el logo', String(error.message || error));
+    }
+  }
+
+  async function buscarImpresorasBluetooth() {
+    if (Platform.OS !== 'android') {
+      avisar('Solo Android', 'La conexión Bluetooth directa funciona en Android.');
+      return;
+    }
+
+    try {
+      setBuscandoImpresoras(true);
+      if (Platform.Version >= 31) {
+        const permisos = await PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        ]);
+        const concedidos = Object.values(permisos).every((v) => v === PermissionsAndroid.RESULTS.GRANTED);
+        if (!concedidos) throw new Error('Concede los permisos Bluetooth y vuelve a intentar.');
+      } else {
+        const permiso = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+        if (permiso !== PermissionsAndroid.RESULTS.GRANTED) {
+          throw new Error('Concede el permiso de ubicación para buscar la impresora.');
+        }
+      }
+
+      const dispositivos = await listarImpresorasBluetooth();
+      setImpresoras(dispositivos || []);
+      if (!dispositivos?.length) {
+        avisar('Sin impresoras', 'Empareja primero la impresora en Ajustes > Bluetooth del teléfono.');
+      }
+    } catch (e) {
+      avisar('Bluetooth', String(e.message || e));
+    } finally {
+      setBuscandoImpresoras(false);
+    }
+  }
+
+  function seleccionarImpresora(device) {
+    set('impresora_bluetooth_nombre', device.name || device.address);
+    set('impresora_bluetooth_direccion', device.address);
+    avisar('Impresora seleccionada', `${device.name || 'Impresora'} fue seleccionada. Pulsa Guardar.`);
   }
 
   async function guardar() {
@@ -1301,7 +1361,19 @@ function Ajustes({ ctx, abrirAuditoria }) {
         cfg: cfgPrueba, cliente: { nombre: 'Cliente de prueba' }, mov,
         balanceAntes: 0, balanceDespues: 500,
       });
-      await imprimir(html, cfgPrueba);
+
+      if (Platform.OS === 'android' && cfgPrueba.impresora_bluetooth_direccion) {
+        const texto = construirTextoComprobante({
+          cfg: cfgPrueba,
+          cliente: { nombre: 'Cliente de prueba' },
+          mov,
+          balanceAntes: 0,
+          balanceDespues: 500,
+        });
+        await imprimirPorBluetooth(cfgPrueba, texto);
+      } else {
+        await imprimir(html, cfgPrueba);
+      }
     } catch (e) {
       avisar('No se pudo imprimir', String(e.message || e));
     }
@@ -1596,73 +1668,82 @@ function Ajustes({ ctx, abrirAuditoria }) {
       </View>
       <Campo label="Mensaje al pie del comprobante" value={f.comprobante_pie}
         onChangeText={(t) => set('comprobante_pie', t)} />
+
+      <Text style={s.label}>Impresora Bluetooth</Text>
+      <Text style={s.sub}>
+        {f.impresora_bluetooth_nombre
+          ? `Seleccionada: ${f.impresora_bluetooth_nombre}`
+          : 'Ninguna impresora seleccionada'}
+      </Text>
+      <Boton
+        texto={buscandoImpresoras ? 'Buscando impresoras...' : '🔎 Buscar impresoras emparejadas'}
+        color={AZUL}
+        onPress={buscarImpresorasBluetooth}
+        style={{ marginBottom: 8 }}
+      />
+      {impresoras.map((device) => (
+        <Boton
+          key={device.address}
+          texto={`🖨️ ${device.name || 'Impresora'} — ${device.address}`}
+          color={f.impresora_bluetooth_direccion === device.address ? VERDE : GRIS}
+          onPress={() => seleccionarImpresora(device)}
+          style={{ marginBottom: 6 }}
+        />
+      ))}
+      {f.impresora_bluetooth_direccion ? (
+        <Boton
+          texto="Quitar impresora seleccionada"
+          color={ROJO}
+          onPress={() => {
+            set('impresora_bluetooth_nombre', '');
+            set('impresora_bluetooth_direccion', '');
+          }}
+          style={{ marginBottom: 8 }}
+        />
+      ) : null}
+
       <Boton texto="🖨️ Imprimir comprobante de prueba" color={AZUL} onPress={imprimirPrueba} />
       <Text style={s.nota}>
-        Bluetooth: por ahora la impresión usa el diálogo de impresión del sistema. Si tu impresora de
-        58 mm está emparejada con el teléfono (Ajustes de Bluetooth) y tienes un servicio de impresión
-        para ella instalado, aparecerá como opción al imprimir. La conexión Bluetooth directa desde
-        la app se agrega al compilar el APK.
+        Primero empareja la impresora Rongta RPP300 desde Ajustes de Bluetooth del teléfono.
+        Después búscala aquí y selecciónala. Esta impresión directa requiere un APK/build nativo;
+        Expo Go no incluye el módulo Bluetooth.
       </Text>
-
-      <Text style={s.seccion}>Respaldo y recuperación</Text>
-      <Boton texto="💾 Exportar copia de seguridad" color={AZUL} onPress={exportarBase} />
-      <Boton texto="📥 Restaurar copia de seguridad" color={GRIS} onPress={restaurarBase} />
-      <Text style={s.nota}>
-        La información queda en la base local SQLite del celular. Si el teléfono se daña, puedes restaurar la copia guardada en tu almacenamiento o compartirla a otro equipo.
-      </Text>
-
-      <Text style={s.seccion}>Licencia / pago mensual</Text>
-      <Text style={s.sub}>Primero mes gratis. Luego, si no paga, la app se bloquea automáticamente.</Text>
-      <View style={s.filaChips}>
-        <Chip texto="Activar 30 días" activo={f.licencia_activa} onPress={activarLicenciaMensual} />
-        <Chip texto="Simular vencido" activo={!f.licencia_activa} onPress={bloquearLicencia} />
-      </View>
-      <Text style={s.sub}>
-        Estado: {f.licencia_activa ? 'Activa' : 'Inactiva'}
-        {f.licencia_expira ? ` · vence ${fmtYMD(f.licencia_expira.slice(0, 10))}` : ''}
-      </Text>
-
-      <Campo label="Nombre del cliente" value={f.licencia_cliente || ''}
-        onChangeText={(t) => set('licencia_cliente', t)} placeholder="Nombre del negocio o cliente" />
-      <Campo label="Meses de activación" value={
-        f.licencia_meses === undefined || f.licencia_meses === null ? '1' : String(f.licencia_meses)
-      }
-        onChangeText={(t) => set('licencia_meses', t.replace(/[^0-9]/g, ''))}
-        placeholder="1" keyboardType="numeric" />
-      <Boton texto="Generar código de activación" color={AZUL} onPress={generarCodigoCliente} />
-      <Campo label="Código del cliente" value={f.licencia_codigo || ''}
-        onChangeText={(t) => set('licencia_codigo', t)} placeholder="FIADO-XXXXXX" />
-      <Boton texto="Activar con código" onPress={activarLicenciaConCodigo} />
-      <Boton texto="📋 Copiar código" color={GRIS} onPress={copiarCodigoCliente} />
-      <Boton texto="💬 Enviar por WhatsApp" color={AZUL} onPress={enviarCodigoWhatsApp} />
     </ScrollView>
   );
 }
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
-});
+let notificationsModulePromise;
+
+async function obtenerNotifications() {
+  if (Platform.OS === 'web') return null;
+
+  notificationsModulePromise ??= import('expo-notifications').then((Notifications) => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+        shouldShowBanner: true,
+        shouldShowList: true,
+      }),
+    });
+    return Notifications;
+  });
+
+  return notificationsModulePromise;
+}
 
 async function pedirPermisosNotificaciones() {
-  if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('fiadoapp', {
-      name: 'FiadoApp',
-      importance: 5,
-      sound: 'default',
-    });
-  }
+  const Notifications = await obtenerNotifications();
+  if (!Notifications) return false;
 
   const { status } = await Notifications.requestPermissionsAsync();
   return status === 'granted';
 }
 
 async function programarNotificacionCliente(cliente, monto, fechaLimite) {
+  const Notifications = await obtenerNotifications();
+  if (!Notifications) return;
   if (!cliente || !fechaLimite || !monto) return;
 
   const permiso = await pedirPermisosNotificaciones();
@@ -1688,7 +1769,9 @@ async function programarNotificacionCliente(cliente, monto, fechaLimite) {
 }
 
 async function cancelarNotificacionesCliente(clienteId) {
-   const todas = await Notifications.getAllScheduledNotificationsAsync();
+  const Notifications = await obtenerNotifications();
+  if (!Notifications) return;
+  const todas = await Notifications.getAllScheduledNotificationsAsync();
   for (const nota of todas) {
     if (nota.identifier.startsWith(`fiado-${clienteId}-`)) {
       await Notifications.cancelScheduledNotificationAsync(nota.identifier).catch(() => {});
